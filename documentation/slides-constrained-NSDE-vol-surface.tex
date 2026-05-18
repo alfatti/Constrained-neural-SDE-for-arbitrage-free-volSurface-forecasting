@@ -1,0 +1,516 @@
+\documentclass[12pt]{article}
+
+% ---- minimal packages only ----
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[landscape,margin=0.7in]{geometry}
+\usepackage{enumitem}
+
+% ---- slide look & feel without beamer ----
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+\setlist[itemize]{leftmargin=1.4em,topsep=2pt,itemsep=2pt,parsep=0pt}
+\setlist[enumerate]{leftmargin=1.8em,topsep=2pt,itemsep=2pt,parsep=0pt}
+
+% slide title macro: rule, big bold title, rule, then content
+\newcommand{\slide}[1]{%
+  \par\noindent\rule{\linewidth}{1.2pt}\par\vspace{2pt}%
+  {\LARGE\bfseries #1}\par\vspace{2pt}%
+  \noindent\rule{\linewidth}{0.5pt}\par\vspace{8pt}}
+
+% footer macro
+\newcommand{\footer}[1]{\vfill\noindent\rule{\linewidth}{0.3pt}\par
+  {\small\itshape #1}}
+
+% shorthands
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\ind}{\mathbf{1}}
+\newcommand{\xib}{\xi}
+\newcommand{\cP}{\mathcal{P}}
+\newcommand{\cS}{\mathcal{S}}
+\newcommand{\cC}{\mathcal{C}}
+
+\begin{document}
+
+% ============================ SLIDE 1 ============================
+\thispagestyle{empty}
+\vspace*{0.5in}
+\begin{center}
+{\huge\bfseries Arbitrage-Free Conditional Forecasting\\[6pt]
+of the Implied Volatility Surface}\\[18pt]
+{\Large A constrained neural SDE with Doob $h$-transform guidance}\\[28pt]
+{\large Internal methodology review --- for discussion}\\[10pt]
+\end{center}
+\vfill
+\begin{center}
+\begin{minipage}{0.85\linewidth}
+\small
+\textbf{One-line summary.} We forecast tomorrow's option-price surface as a
+diffusion in a low-dimensional \emph{factor} space whose state is confined,
+by construction, to the polytope of arbitrage-free surfaces; the drift and
+diffusion are neural networks; rare-regime conditioning is layered on top
+via a Doob $h$-transform learned off-policy.
+\end{minipage}
+\end{center}
+\vfill
+\clearpage
+
+% ============================ SLIDE 2 ============================
+\slide{The problem: forecasting the vol surface}
+
+\textbf{Object.} On a fixed lattice of $N$ options $(\tau_j, m_j)$
+(time-to-expiry $\tau$, moneyness $m=K/S$), the surface at day $k$ is a
+vector of normalised call prices
+\[
+\mathbf c_k \in \R^N, \qquad c_j = C_j / S \quad (\text{dimensionless, } O(1)).
+\]
+Implied vol $\sigma_j$ is an entrywise, monotone, bijective transform of $c_j$.
+
+\vspace{6pt}
+\textbf{Task.} Given today's surface and recent history, produce the
+\emph{conditional distribution} of tomorrow's surface:
+\[
+p\bigl(\mathbf c_{k+1} \,\big|\, \mathbf c_k,\; \text{history}\bigr).
+\]
+Not a point forecast --- a full predictive law, for risk, scenario
+generation, and pricing of path-dependent books.
+
+\vspace{6pt}
+\textbf{Three requirements, simultaneously.}
+\begin{itemize}
+\item[(R1)] \textbf{No static arbitrage.} Every surface drawn from the
+  forecast must satisfy calendar monotonicity + butterfly convexity.
+  Violations are model-free, instantly exploitable.
+\item[(R2)] \textbf{Realistic dynamics.} The forecast must reflect
+  volatility clustering / regime structure --- i.e.\ genuinely depend on
+  history, not just today's snapshot.
+\item[(R3)] \textbf{Rare-regime conditioning.} We want to sample
+  ``tomorrow, \emph{given} a stress regime'' (high VIX, drawdown), not just
+  the unconditional forecast.
+\end{itemize}
+
+\footer{The hard part is doing all three at once. Each is easy alone.}
+\clearpage
+
+% ============================ SLIDE 3 ============================
+\slide{Why this is hard --- the no-arbitrage geometry}
+
+\textbf{Static no-arbitrage is a polyhedron in price space.}
+For a lattice, the arbitrage-free surfaces form
+\[
+\cC_{\mathrm{NA}} = \{\mathbf c \in \R^N : A\,\mathbf c \ge \mathbf{\hat b}\},
+\]
+a convex polyhedron --- $A,\mathbf{\hat b}$ encode price bounds, monotonicity
+in $\tau$, monotonicity + convexity in $m$. (Carr--Madan; Cousot;
+Cohen--Reisinger--Wang.)
+
+\vspace{6pt}
+\textbf{Obstructions to modelling directly.}
+\begin{itemize}
+\item \emph{Dimension.} $N$ is large; $\cC_{\mathrm{NA}}$ lives in $\R^N$.
+  A dynamic model on all $N$ prices is unwieldy and the prices are highly
+  redundant.
+\item \emph{Vol space is worse.} The same region in implied-vol coordinates
+  is \emph{non-convex} (the convexity constraint becomes the nonlinear
+  Durrleman condition). Anything that needs convexity breaks here.
+\item \emph{Boundary is measure zero.} Naively conditioning on
+  ``$\mathbf c \in \cC_{\mathrm{NA}}$'' or on its boundary is conditioning
+  on a measure-zero event.
+\end{itemize}
+
+\vspace{6pt}
+\textbf{The move that fixes all three:} reduce to a small set of
+\emph{factors}. The no-arbitrage region pulls back to a low-dimensional
+polytope, convexity is preserved (linear map of a polyhedron), and the data
+lives in the polytope's interior with probability $\approx 1$.
+
+\footer{Factor reduction is not just compression --- it makes the geometry tractable.}
+\clearpage
+
+% ============================ SLIDE 4 ============================
+\slide{Step 1 --- Factor representation of the surface}
+
+\textbf{Linear factor model} (Cohen--Reisinger--Wang 2021).
+Posit a small latent factor $\xi_k \in \R^d$ with
+\[
+\mathbf c_k \;=\; \mathbf G_0 \;+\; \mathbf G^\top \xi_k \;+\;
+\underbrace{\varepsilon_k}_{\text{tiny residual}},
+\qquad d \ll N.
+\]
+$\mathbf G_0$ = lattice average; $\mathbf G \in \R^{d\times N}$ = price-basis
+matrix. We obtain $\mathbf G$ by PCA on the centred surface time series.
+On Heston data, $d=2$ already gives $<0.05\%$ reconstruction error.
+
+\vspace{8pt}
+\textbf{The polytope pulls back.} Substitute the factor model into
+$A\mathbf c \ge \mathbf{\hat b}$:
+\[
+\boxed{\;\cP \;=\; \{\xi \in \R^d : V\xi \ge \mathbf b\}, \qquad
+V := A\,\mathbf G^\top, \quad \mathbf b := \mathbf{\hat b} - A\,\mathbf G_0\;}
+\]
+A convex polytope in $\R^d$ ($d=2$ here). Affine image of a polyhedron is a
+polyhedron --- convexity is preserved.
+
+\vspace{8pt}
+\textbf{Consequences.}
+\begin{itemize}
+\item Modelling problem drops from $\R^N$ to $\R^d$ with $d=2$.
+\item The arbitrage-free constraint is now ``$\xi_t$ stays in a fixed
+  low-dim polytope''.
+\item Empirically the data sits well inside $\cP$: conditioning on
+  positive-measure subsets of $\cP$ is now well posed.
+\end{itemize}
+
+\footer{Everything downstream is a model for the factor process $\xi_t$ inside $\cP$.}
+\clearpage
+
+% ============================ SLIDE 5 ============================
+\slide{Primer --- what is a ``neural SDE''?}
+
+\textbf{Familiar object.} An It\^o diffusion
+\[
+d\xi_t = \mu(\xi_t)\,dt + \sigma(\xi_t)\,dW_t .
+\]
+In a classical parametric model, $\mu,\sigma$ have a fixed functional form
+(e.g.\ affine, CIR-type) with a handful of parameters.
+
+\vspace{8pt}
+\textbf{Neural SDE = same SDE, nonparametric coefficients.}
+$\mu$ and $\sigma$ are \emph{neural networks} $\mu_\theta,\sigma_\theta$ ---
+flexible function approximators with weights $\theta$. Nothing else changes:
+it is still an SDE, still simulated by Euler--Maruyama.
+
+\vspace{8pt}
+\textbf{How it is calibrated --- this is just MLE.}
+Discretise: over a step $\Delta t$,
+\[
+\xi_{k+1} \,\big|\, \xi_k \;\overset{\text{Euler}}{\sim}\;
+\mathcal N\!\bigl(\xi_k + \mu_\theta(\xi_k)\,\Delta t,\;
+a_\theta(\xi_k)\,\Delta t\bigr),
+\qquad a_\theta = \sigma_\theta\sigma_\theta^\top .
+\]
+Maximise the Gaussian transition log-likelihood of the observed path over
+$\theta$:
+\[
+\max_\theta \;\sum_k \log p\bigl(\xi_{k+1}\mid\xi_k;\theta\bigr).
+\]
+Drift and diffusion are learned jointly; ``model selection'' is absorbed
+into fitting.
+
+\vspace{6pt}
+\textbf{Mental model.} A neural SDE is to a parametric SDE what a spline is
+to a fixed polynomial: same equation, the coefficient \emph{shape} is
+learned from data.
+
+\footer{No magic --- It\^o calculus is unchanged. Only $\mu,\sigma$ become neural nets.}
+\clearpage
+
+% ============================ SLIDE 6 ============================
+\slide{Step 2 --- Keeping the SDE inside the polytope}
+
+\textbf{Requirement.} The factor diffusion must satisfy
+$\xi_t \in \cP$ for all $t$, almost surely --- otherwise the reconstructed
+surface has arbitrage.
+
+\vspace{6pt}
+\textbf{Friedman--Pinsky (1973): when does a diffusion stay in a region?}
+For each facet $\{v_k^\top \xi = b_k\}$ of the polytope, it suffices that
+\[
+\underbrace{v_k^\top \sigma\sigma^\top v_k = 0}_{\text{no diffusion across the facet}}
+\qquad\text{and}\qquad
+\underbrace{v_k^\top \mu \ge 0}_{\text{drift points inward}}
+\qquad\text{on that facet.}
+\]
+Intuitive: kill the normal component of noise at the wall, and lean inward.
+
+\vspace{6pt}
+\textbf{How we enforce it.} Wrap the raw network outputs in two operators:
+\begin{itemize}
+\item \textbf{Diffusion gate.} Multiply $\sigma$ by a smooth scalar
+  $g(\xi)=\mathrm{sigmoid}\bigl(\beta(d_{\min}(\xi)/\rho^\star-1)\bigr)$,
+  where $d_{\min}$ is the distance to the nearest facet.
+  $g\to 0$ at the boundary, $g\to1$ in the interior.
+\item \textbf{Drift correction.} Add an inward pull toward the polytope
+  centre that switches on only near the boundary:
+  $\mu = \hat\mu + c_0\,\mathrm{ReLU}(1-d_{\min}/\rho^\star)\,(\xi^{c}-\xi)$.
+\end{itemize}
+$\rho^\star$ (activation band) is auto-tuned to a small percentile of the
+data's distance-to-boundary, so the operators are dormant on ordinary
+samples and active only near the wall.
+
+\vspace{4pt}
+\textbf{Practical note.} Our gate damps \emph{all} diffusion near the wall
+(simpler than the exact CRW construction); a one-step projection is kept as
+a safety net. In experiments, generated surfaces are arbitrage-free.
+
+\footer{The polytope is (effectively) absorbing --- arbitrage-freeness is structural, not a penalty.}
+\clearpage
+
+% ============================ SLIDE 7 ============================
+\slide{Step 3 --- Making it a \emph{conditional} forecaster}
+
+\textbf{Problem with a plain SDE on $\xi$.} $d\xi_t=\mu(\xi_t)dt+\sigma(\xi_t)dW_t$
+is \emph{Markov in $\xi$}: tomorrow depends on the past only through today's
+$\xi$. Real surfaces have memory (regimes, clustering). (R2) is unmet.
+
+\vspace{8pt}
+\textbf{Fix --- exogenous context augmentation.} Introduce a context vector
+$Y_t$ that is a \emph{deterministic function of past observations}, and let
+the coefficients see it:
+\[
+\boxed{\;d\xi_t = \mu(\xi_t,\,Y_t)\,dt + \sigma(\xi_t,\,Y_t)\,dW_t\;}
+\]
+$Y_t$ enters the network input alongside $\xi_t$. No new Brownian motion,
+no new SDE for $Y$ --- it is observable history.
+
+\vspace{6pt}
+\textbf{What we put in $Y$.}
+\[
+Y_t = \bigl(\,\mathrm{EWMA}_5(\xi),\;\; \mathrm{EWMA}_{20}(\xi),\;\;
+\mathrm{RealisedVar}_{20}(\log S)\,\bigr).
+\]
+Short/long memory of the factor level + a return-based regime indicator.
+
+\vspace{6pt}
+\textbf{Why this is the parsimonious choice.}
+\begin{itemize}
+\item The boundary operators still act on $\xi$ only --- the polytope
+  machinery is untouched.
+\item Calibration is unchanged: still MLE on transitions, now conditioned on
+  $(\xi_k,Y_k)$.
+\item The $h$-transform layer (next) composes without modification.
+\end{itemize}
+
+\footer{Way 1 of 3 (vs.\ joint $(\xi,Y)$ dynamics or a latent state) --- chosen for minimal moving parts.}
+\clearpage
+
+% ============================ SLIDE 8 ============================
+\slide{Primer --- Doob's $h$-transform (conditioning a diffusion)}
+
+\textbf{Question.} You have a diffusion. You want the \emph{same} diffusion
+but \emph{conditioned} on a future event $\{\xi_T \in \cS\}$. What are the
+dynamics of the conditioned process?
+
+\vspace{6pt}
+\textbf{Doob's answer.} Define the \emph{success probability}
+\[
+h(t,\xi) := \Prob\bigl(\xi_T \in \cS \;\big|\; \xi_t = \xi\bigr).
+\]
+Then the conditioned process is the \emph{same SDE with one extra drift term}:
+\[
+\boxed{\;d\xi_t^{\cS}
+= \bigl[\,\mu(\xi_t^{\cS}) + \sigma\sigma^\top\,\nabla\log h(t,\xi_t^{\cS})\,\bigr]dt
++ \sigma\,dW_t\;}
+\]
+The guidance term $\sigma\sigma^\top\nabla\log h$ steers paths toward $\cS$.
+Diffusion is unchanged. Terminal law is exactly the conditioned law.
+
+\vspace{6pt}
+\textbf{Reading the formula.} $\nabla\log h$ points toward regions of higher
+success probability; you nudge the drift that way, scaled by the local
+covariance. Where $\cS$ is already certain ($h\equiv1$), the correction
+vanishes.
+
+\vspace{6pt}
+\textbf{Analogy quants will know.} This is the change of measure behind
+Brownian bridges, importance sampling of rare events, and the ``tilting'' in
+large-deviation arguments --- here applied to steer a generative SDE.
+
+\footer{$h$-transform = the rigorous way to condition an SDE on a future event.}
+\clearpage
+
+% ============================ SLIDE 9 ============================
+\slide{Step 4 --- Learning $h$ off-policy (CDG-ML)}
+
+\textbf{Catch.} $h(t,\xi)$ is itself an unknown conditional probability.
+We must \emph{learn} it. Key fact:
+
+\vspace{4pt}
+\emph{Under the base SDE, the process $t\mapsto h(t,\xi_t)$ is a
+martingale} terminating at the indicator $\ind\{\xi_T\in\cS\}$.
+
+\vspace{6pt}
+\textbf{Martingale loss (Guo--Tang--Xu 2026).} Approximate $h$ by a network
+$h_\phi$ and fit by least squares to the terminal indicator, integrated over
+paths of the \emph{pretrained base SDE}:
+\[
+\min_\phi \;\;\E\!\left[\int_0^T
+\bigl(\,h_\phi(t,\xi_t,Y) - \ind\{\xi_T\in\cS\}\,\bigr)^2\,dt\right].
+\]
+The minimiser is exactly $h$ (as an $L^2$ projection). The expectation is
+over rollouts of the base model --- so this is \textbf{off-policy}: simulate
+the base SDE, label each path by whether it landed in $\cS$, regress.
+
+\vspace{6pt}
+\textbf{Why this is attractive.}
+\begin{itemize}
+\item The base arbitrage-free SDE is trained \emph{once}; $h_\phi$ is a
+  cheap add-on per conditioning set $\cS$.
+\item No labelled rare events needed --- the base model generates its own
+  training signal.
+\item Conditioning is \emph{post-hoc}: change $\cS$, retrain only the small
+  $h$-network.
+\end{itemize}
+
+\vspace{4pt}
+\textbf{Guided sampling.} Add $\eta\,\sigma\sigma^\top\nabla\log h_\phi$ to
+the drift. $\eta=1$ = exact conditioning; $\eta>1$ = heuristic sharpening.
+
+\footer{CDG-ML = ``train the base SDE once, condition cheaply and repeatedly''.}
+\clearpage
+
+% ============================ SLIDE 10 ============================
+\slide{The full pipeline}
+
+\textbf{Offline (once).}
+\begin{enumerate}
+\item \textbf{Factor decode.} PCA on historical surfaces $\Rightarrow$
+  basis $(\mathbf G_0,\mathbf G)$, factors $\xi_k$, polytope
+  $\cP=\{V\xi\ge \mathbf b\}$.
+\item \textbf{Context.} Build $Y_k$ (EWMAs, realised variance) from history;
+  normalise.
+\item \textbf{Train base NSDE.} Fit $\mu_\theta(\xi,Y),\sigma_\theta(\xi,Y)$
+  by Euler MLE, with Friedman--Pinsky boundary operators $\Rightarrow$
+  arbitrage-free by construction.
+\item \textbf{(Optional) Train $h_\phi$} for a chosen stress set $\cS$ via
+  the off-policy martingale loss.
+\end{enumerate}
+
+\textbf{Online (per forecast).}
+\begin{enumerate}
+\item Observe today's surface $\Rightarrow$ project to $\xi_k$, compute
+  context $Y_k$.
+\item Simulate the (optionally $h$-guided) SDE one step / one horizon ahead.
+\item Reconstruct prices $\mathbf c=\mathbf G_0+\mathbf G^\top\xi$ --- lands
+  in $\cC_{\mathrm{NA}}$ automatically.
+\item Invert Black--Scholes entrywise $\Rightarrow$ implied-vol surface.
+\end{enumerate}
+
+\vspace{6pt}
+\begin{center}
+\fbox{\begin{minipage}{0.92\linewidth}\centering\small
+\textbf{Requirements met:}\;
+(R1) no-arbitrage = polytope containment via FP operators \;$\bullet$\;
+(R2) realistic dynamics = context-conditioned drift/diffusion \;$\bullet$\;
+(R3) rare regimes = Doob $h$-transform guidance
+\end{minipage}}
+\end{center}
+
+\footer{Three papers, one pipeline: CRW factors + FP operators; context augmentation; Doob/CDG guidance.}
+\clearpage
+
+% ============================ SLIDE 11 ============================
+\slide{Experiment setup --- synthetic Heston}
+
+\textbf{Why synthetic.} Known ground truth, exactly arbitrage-free data,
+isolates estimation error from data quality. Heston is the natural testbed.
+
+\vspace{6pt}
+\textbf{Data-generating model.} Heston stochastic volatility,
+\[
+dS_t = \sqrt{v_t}\,S_t\,dW_t^S,\qquad
+dv_t = \kappa(\theta - v_t)\,dt + \sigma_v\sqrt{v_t}\,dW_t^v,\qquad
+d\langle W^S,W^v\rangle=\rho\,dt.
+\]
+Parameters: $\kappa=3,\ \theta=0.04,\ \sigma_v=0.3,\ \rho=-0.7,\ v_0=0.04,\
+S_0=100$ (Feller satisfied). Calls priced by Carr--Madan FFT.
+
+\vspace{6pt}
+\textbf{Protocol.}
+\begin{itemize}
+\item Lattice: $\tau\in\{0.05,0.1,0.25,0.5\}$, $m\in\{0.9,\dots,1.1\}$
+  $\Rightarrow N=20$ options; $83$ no-arbitrage inequalities.
+\item Two independent paths, $500$ steps each: \textbf{train} (seed 42),
+  \textbf{held-out test} (seed 43). Test surfaces projected into the
+  \emph{train} factor basis --- no refitting.
+\item $d=2$ factors. Models: (A) no-context NSDE, (B) context NSDE
+  ($d_Y=5$). Baseline: random walk with empirical increment covariance.
+\end{itemize}
+
+\vspace{6pt}
+\textbf{What we measure.}
+\begin{itemize}
+\item One-step \emph{test} NLL and price MAPE (forecast accuracy).
+\item Polytope containment + terminal arbitrage (structural correctness).
+\item $h$-guided vs.\ unguided rare-event hit rate (does conditioning work).
+\end{itemize}
+
+\footer{Heston is Markov in $(S,v)$ --- a deliberate stress test for whether context helps (see next).}
+\clearpage
+
+% ============================ SLIDE 12 ============================
+\slide{What to expect from the Heston experiment}
+
+\textbf{An honest prediction, stated before the numbers.}
+Heston is \emph{Markov in $(S,v)$}, and the first factor $\xi_1$ is
+essentially the variance $v$. So today's $\xi$ already \emph{is} the state
+--- context $Y$ (a function of past $\xi$) cannot add predictive
+information on this data-generating process.
+
+\vspace{8pt}
+\textbf{Therefore we expect, on Heston:}
+\begin{itemize}
+\item Base NSDE clearly beats the random-walk baseline (drift/diffusion are
+  informative) --- \emph{yes}.
+\item Context model $\approx$ no-context model --- \emph{a tie is the
+  correct outcome here}, not a disappointment.
+\item Generated surfaces stay arbitrage-free; $h$-guidance measurably
+  raises the rare-regime probability.
+\end{itemize}
+
+\vspace{8pt}
+\textbf{Why run it anyway.}
+\begin{itemize}
+\item Validates the \emph{pipeline} end-to-end: factor geometry, FP
+  containment, $h$-transform guidance.
+\item Confirms the context channel does no harm when there is nothing to
+  exploit --- a prerequisite before trusting it on real data.
+\item The payoff for context is expected on \emph{real} markets, where
+  regime memory exceeds any local Markov state.
+\end{itemize}
+
+\vspace{6pt}
+\textbf{Discussion points for the group.}
+factor count $d$ and dynamic-arbitrage factors $\bullet$ exact vs.\ damped
+FP operators $\bullet$ choice of context features $\bullet$ guidance scale
+$\eta$ and its interpretation $\bullet$ moving to real surfaces.
+
+\footer{The method is built so that ``context didn't help on Heston'' is a pass, not a fail.}
+\clearpage
+
+% ============================ SLIDE 13 ============================
+\thispagestyle{empty}
+\vspace*{0.6in}
+\begin{center}
+{\huge\bfseries Summary}
+\end{center}
+\vspace{18pt}
+\begin{center}
+\begin{minipage}{0.9\linewidth}
+\large
+\begin{itemize}\setlength{\itemsep}{10pt}
+\item \textbf{Problem.} Conditional, distributional, \emph{arbitrage-free}
+  forecasting of the vol surface.
+\item \textbf{Key idea.} Work in factor space: the no-arbitrage region
+  becomes a small convex \emph{polytope} $\cP$.
+\item \textbf{Dynamics.} A neural SDE on $\cP$, kept inside by
+  Friedman--Pinsky boundary operators; coefficients depend on $(\xi,Y)$
+  with $Y$ = observable history.
+\item \textbf{Conditioning.} Doob $h$-transform; $h$ learned off-policy by a
+  martingale (least-squares-to-indicator) loss.
+\item \textbf{Validation.} Synthetic Heston --- pipeline works, surfaces
+  stay arbitrage-free, guidance steers rare regimes; context is (correctly)
+  neutral on Markovian data.
+\end{itemize}
+\end{minipage}
+\end{center}
+\vfill
+\begin{center}
+\rule{0.5\linewidth}{0.4pt}\\[6pt]
+{\itshape Discussion}
+\end{center}
+\vspace*{0.4in}
+
+\end{document}
